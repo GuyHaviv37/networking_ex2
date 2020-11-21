@@ -3,43 +3,18 @@ import errno
 import socket
 import struct
 import sys
+from enum import Enum
+from select import select
 
 STRUCT_SIZE = 33
 UTF = 'utf-8'
+RECV_MSG_LEN = 13
 
 
-# returns True if message sent successfully
-def mySendall(clientSoc, byteStep):
-    try:
-        while len(byteStep) != 0:
-            ret = clientSoc.send(byteStep)
-            byteStep = byteStep[ret:]
-    except OSError as error:
-        print("Disconnected from server")
-        return False
-    return True
-
-
-# returns bytes object with the data received from server
-# return true if message received successfully ,otherwise returns False
-def myRecvall(clientSoc, expectedLenInBytes):
-    gotSize = 0
-    chunks = []
-    while gotSize < expectedLenInBytes:
-        try:
-            data = clientSoc.recv(1024)
-        except OSError as error:
-            if error.errno == errno.ECONNREFUSED:
-                print("Disconnected from server")
-            else:
-                print(error.strerror + ", exit game")
-            return False, b''
-        if data == b'':
-            print("Disconnected from server")
-            return False, b''
-        gotSize += sys.getsizeof(data) - STRUCT_SIZE
-        chunks.append(data)
-    return True, b''.join(chunks)
+class CurrentState(Enum):
+    USER_INPUT = 1
+    GET_MSG = 2
+    SEND_MSG = 3
 
 
 # Generalized version of shutdownSocketClient
@@ -78,7 +53,7 @@ def createStep():
 def checkValidParm(tav, nA, nB, nC):
     if nA < 0 or nB < 0 or nC < 0:
         return False
-    if tav == b'i' or tav == b'g' or tav == b's' or tav == b'c' or tav == b'x' or tav == b't':
+    if tav == b'i' or tav == b'g' or tav == b's' or tav == b'c' or tav == b'x' or tav == b't' or tav == b'w' or tav == b'r':
         return True
     return False
 
@@ -89,11 +64,18 @@ def parseCurrentPlayStatus(data):
     valid = checkValidParm(tav, nA, nB, nC)
     if valid:
         if tav == b'i':
+            print("Now you are playing against the server!")
             print("nim")
         elif tav == b'g' or tav == b's' or tav == b'c':
             print("Move accepted")
         elif tav == b'x' or tav == b't':
             print("Illegal move")
+        elif tav == b'r':
+            print("You are rejected by the server.")
+            return False
+        elif tav == b'w':
+            print("Waiting to play against the server.")
+            return True
 
         print("Heap A: " + str(nA))
         print("Heap B: " + str(nB))
@@ -112,23 +94,88 @@ def parseCurrentPlayStatus(data):
         return False
 
 
+def recvMsg(clientSoc):
+    try:
+        data = clientSoc.recv(1024)
+    except OSError as error:
+        if error.errno == errno.ECONNREFUSED:
+            print("Disconnected from server")
+        else:
+            print(error.strerror + ", exit game")
+        return False, b''
+    if data == b'':
+        print("Disconnected from server")
+        return False, b''
+    return True, data
+
+
+def sendMsg(clientSoc, byteMsgToSend):
+    try:
+        if len(byteMsgToSend) != 0:
+            ret = clientSoc.send(byteMsgToSend)
+            byteMsgToSend = byteMsgToSend[ret:]
+    except OSError as error:
+        print("Disconnected from server")
+        return False, b''
+    return True, byteMsgToSend
+
+
+# return True if user asked to QUIT, otherwise return False
+# if user input is not Quit, keep playing- ignore the input
+def getInput():
+    userInput = input()
+    splitUserInput = userInput.split()
+    # user input is not Q
+    if len(splitUserInput) != 1:
+        return False
+    return splitUserInput[0] == "Q"
+
+
 # while game on and connection is valid, get the heap status, and send the new game move
 def startPlay(clientSoc):
-    run = True
-    while run:
-        run, allDataRecv = myRecvall(clientSoc, 13)
-        if run and sys.getsizeof(allDataRecv) - STRUCT_SIZE == 13:
-            run = parseCurrentPlayStatus(allDataRecv)
-            if run:
-                quitCommand, bytesNewMove = createStep()
-
-                if not quitCommand:
-                    run = mySendall(clientSoc, bytesNewMove)
+    keepPlaying = True
+    state = CurrentState.GET_MSG
+    gotSize = 0
+    chunks = []
+    byteMsgToSend = b''
+    while keepPlaying:
+        readable, writable, _ = select([clientSoc, sys.stdin], [clientSoc],[])
+        if state == CurrentState.GET_MSG:
+            if sys.stdin in readable:
+                keepPlaying = not getInput()
+                if not keepPlaying:
+                    break
+            if clientSoc in readable:
+                keepPlaying, data = recvMsg(clientSoc)
+                if not keepPlaying:
+                    break
+                gotSize += sys.getsizeof(data) - STRUCT_SIZE
+                chunks.append(data)
+                if gotSize == RECV_MSG_LEN:
+                    allDataRecv = b''.join(chunks)
+                    chunks = []
+                    gotSize = 0
+                    keepPlaying = parseCurrentPlayStatus(allDataRecv)
+                    state = CurrentState.USER_INPUT
                 else:
-                    run = False
-        elif run:
-            print("server sent invalid message, exit game")
-            run = False
+                    print("server sent invalid message, exit game")
+                    keepPlaying = False
+        elif state == CurrentState.SEND_MSG:
+            if sys.stdin in readable:
+                keepPlaying = not getInput()
+                if not keepPlaying:
+                    break
+            if clientSoc in writable:
+                keepPlaying, byteMsgToSend = sendMsg(clientSoc, byteMsgToSend)
+                if len(byteMsgToSend) == 0:
+                    state = CurrentState.GET_MSG
+                    byteMsgToSend = b''
+        else:
+            quitCommand, byteMsgToSend = createStep()
+            if not quitCommand:
+                state = CurrentState.SEND_MSG
+            else:
+                keepPlaying = False
 
 
 # create the first connection

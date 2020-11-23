@@ -3,39 +3,109 @@ import socket
 import struct
 import sys
 import errno
+from select import select
+from enum import Enum
 
 UTF = 'utf-8'
 
-# Sends all of bytesData to conn
-def mySendall(conn, bytesData):
-    try:
-        while (len(bytesData) != 0):
-            ret = conn.send(bytesData)
-            bytesData = bytesData[ret:]
-    except OSError as error:
-        print(error.strerror)
-        return False
-    return True
+globals = {
+        'na': 0,
+        'nb': 0,
+        'nc': 0,
+        'maxPlaying' : 0,
+        'maxWaiting' : 0,
+        'PORT' : 6444,
+        'optimal' : False
+    }
 
-# Recieves MSGLEN bytes of data from socket 'conn'
-# Returns bytes object - that can be unpacked into tuple
-def myRecvall(conn,MSGLEN):
+class AcceptStatus(Enum):
+    PLAY = 0
+    WAIT = 1
+    REJECT = 2
+
+class ClientStatus(Enum):
+    READY_TO_SEND = 0
+    SENDING = 1
+    READY_TO_READ = 2
+    READING = 3
+
+# Gets command line input
+def getConsoleInput():
+    inputLen = len(sys.argv)
+    if not(inputLen >= 6  or inputLen <= 10) :
+        print("Invalid number of arguements for nim-server")
+        print("Should be of format : heapA heapB heapC num_players wait-list-size [PORT] [--optimal-startegy] [--multithreading timer] ")
+        sys.exit(0)
+    globals['na'] = int(sys.argv[1])
+    globals['nb'] = int(sys.argv[2])
+    globals['nc']= int(sys.argv[3])
+    globals['maxPlaying'] = int(sys.argv[4])
+    globals['maxWaiting'] = int(sys.argv[5])
+    if(inputLen >= 7): # can add check to viable PORT number , i.e. > 1024
+        if sys.argv[6].isdigit():
+            globals['PORT'] = int(sys.argv[6])
+        else:
+            print("Error: PORT number specified is invalid.")
+            sys.exit(0) 
+    globals['optimal'] = (inputLen >= 8 and sys.argv[7] == "--optimal-strategy")
+    # if inputLen >= 10 and both the flag and timer are correct we can add support for multithreading and timer
+
+
+def initUser(socket,accept_status):
+    if(accept_status == AcceptStatus.PLAY):
+        messageTag = 'i'
+    elif(accept_status == AcceptStatus.WAIT):
+        messageTag = 'w'
+    else:
+        messageTag = 'r'
+    return {
+        'socket' : socket,
+        'heaps' : [globals['na'],globals['nb'],globals['nc']] , 
+        'messageTag' : messageTag,
+        'gameOver' : False,
+        'status' : ClientStatus.READY_TO_SEND,
+        'sendingBuffer' : struct.pack(">ciii",messageTag.encode(UTF),globals['na'],globals['nb'],globals['nc']),
+        'recvChunks' : [],
+        'bytesRecv' : 0,
+        'disconnected' : False
+    }
+
+# DB methods
+def addUser(db,userSocket,accept_status):
+    userId = userSocket.fileno()
+    user_data = initUser(userSocket,accept_status)
+    db[userId] = user_data
+
+def deleteUser(db,userId):
+    del db[userId]
+
+# Recv and Send msg
+def recvMsg(db,client):
     STRUCT_SIZE = 33
-    bytesLeft = 0
-    chunks = []
-    while bytesLeft < MSGLEN:
-        try:
-            data = conn.recv(1024) # to be changed later
-        except OSError as error:
-            if(error.errno == errno.ECONNREFUSED):
-                # disconnected from socket
-                return b'Q\x00\x00\x00\x00'
-        if data == b'':
-            # disconnected from socket
-            return b'Q\x00\x00\x00\x00'
-        bytesLeft += sys.getsizeof(data)-STRUCT_SIZE
-        chunks.append(data)
-    return b''.join(chunks)
+    print(f"Server receiveing msg for client {client}")
+    try:
+        data = db[client]['socket'].recv(1024)
+    except OSError as error:
+        if error.errno == errno.ECONNREFUSED:
+            # client disconnect from server
+            db[client]['disconnected'] = True
+    if data == b'':
+        # client disconnect from server
+        db[client]['disconnected'] = True
+    # Some data was recieved
+    db[client]['bytesRecv'] += sys.getsizeof(data)-STRUCT_SIZE 
+    db[client]['recvChunks'].append(data)
+
+def sendMsg(db, client):
+    print(f"Server sending msg for client {client}")
+    print(f"message to send is {db[client]['sendingBuffer']}")
+    try:
+        if len(db[client]['sendingBuffer']) != 0:
+            ret = db[client]['socket'].send(db[client]['sendingBuffer'])
+            db[client]['sendingBuffer'] = db[client]['sendingBuffer'][ret:]
+    except OSError as error:
+        # client disconnect from server
+        db[client]['disconnected'] = True
 
 # Preforms shutdown to the socket - i.e. checks for 'leftover' data on recv buffer
 def shutdownSocket(conn):
@@ -49,27 +119,34 @@ def shutdownSocket(conn):
             break
     conn.close()
 
-# Gets command line input
-# returns - N_a,N_b,N_c[,PORT]
-# TESTED
-def getConsoleInput():
-    inputLen = len(sys.argv)
-    if not(inputLen == 4  or inputLen==5) :
-        print("Invalid number of arguements for nim-server")
-        print("Should be 3/4 : heapA heapB heapC [PORT]")
-        sys.exit(0)
-    na = int(sys.argv[1])
-    nb = int(sys.argv[2])
-    nc = int(sys.argv[3])
-    if(inputLen == 5): # can add check to viable PORT number , i.e. > 1024
-        if sys.argv[4].isdigit():
-            port = int(sys.argv[4])
-        else:
-            print("Error: PORT number specified is invalid.")
-            sys.exit(0) 
+# GAMEPLAY methods
+def handleNewMove(db,client,msg):
+    heapIndex, amount = parseRecvInput(msg)
+    print(f"Server handing new move w/ msg - {heapIndex} , {amount}")
+    # Make game move and set messageTag:
+    if(heapIndex >= 3): # Quit current game
+        db[client]['disconnected'] = True
+    if(not checkValid(db[client]['heaps'],heapIndex,amount)):
+        messageTag = 'x'
+        updateHeapsServer(db[client]['heaps'])
+        if(checkForWin(db[client]['heaps'])):
+            # server wins - last client move was invalid
+            messageTag = 't'
+            db[client]['gameOver'] = True
     else:
-        port = 6444
-    return na,nb,nc,port
+        messageTag = 'g'
+        updateHeapsClient(db[client]['heaps'],heapIndex,amount)
+        if(checkForWin(db[client]['heaps'])):
+            # client wins - last client move was valid
+            messageTag = 'c'
+            db[client]['gameOver'] = True
+        else:
+            updateHeapsServer(db[client]['heaps'])
+            if(checkForWin(db[client]['heaps'])):
+                # server wins - last client move was valid
+                messageTag = 's'
+                db[client]['gameOver'] = True
+    return struct.pack(">ciii",messageTag.encode(UTF),db[client]['heaps'][0],db[client]['heaps'][1],db[client]['heaps'][2])
 
 # Gets char as heapId
 # 'A'/'B'/'C' returns 0,1,2 respectivly.
@@ -129,11 +206,16 @@ def updateHeapsClient(heaps,heapIndex,amount):
 def checkForWin(heaps):
     return True if sum(heaps) <= 0 else False
 
-# Main server function
-def server(na,nb,nc,PORT):
+
+def server():
+    # Establish data structures
+    db = dict()
+    waitingList = []
+    currentPlayers = 0
+    # Establish a listening socket
     try:
         listenSocket = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-        listenSocket.bind(('',PORT))
+        listenSocket.bind(('',globals['PORT']))
         listenSocket.listen(1)
     except OSError as error:
         print('An error occured establishing a server:')
@@ -141,113 +223,91 @@ def server(na,nb,nc,PORT):
         if(listenSocket.fileno() >= 0):
             listenSocket.close()
         sys.exit(0)
-
     while True:
-        try:
-            conn , addr = listenSocket.accept()
-        except OSError as err:
-            print('Failed to accept an incoming connection... ')
-            print(err.strerror)
-            break
-        #Initialize game
-        init = True
-        gameOver = False
-        heaps = [na,nb,nc]
-        messageTag = 'i'
-        dataSent = struct.pack(">ciii",messageTag.encode(UTF),heaps[0],heaps[1],heaps[2])
-        while(not gameOver): #can be changed to while True
-            # Send message to client
-            print(messageTag)
-            if init == True: # send with 'i' tag
-                init = False
-            else: # send with messageTag
-                dataSent = struct.pack(">ciii",messageTag.encode(UTF),heaps[0],heaps[1],heaps[2])
+        # retrieve ready sockets from select
+        readable, writble, _ = select([listenSocket]+list(db.keys()),list(db.keys()),[])
 
-            if not mySendall(conn,dataSent):
-                break # Quit current game
-
-            # Receive message from client
-            bytesRecv = myRecvall(conn,5)
-            heapIndex, amount = parseRecvInput(bytesRecv)
-            # Make game move and set messageTag:
-            if(heapIndex >= 3): # Quit current game
-                break
-            print(checkValid(heaps,heapIndex,amount))
-            if(not checkValid(heaps,heapIndex,amount)):
-                messageTag = 'x'
-                updateHeapsServer(heaps)
-                if(checkForWin(heaps)):
-                    # server wins - last client move was invalid
-                    messageTag = 't'
-            else:
-                messageTag = 'g'
-                updateHeapsClient(heaps,heapIndex,amount)
-                if(checkForWin(heaps)):
-                    # client wins - last client move was valid
-                    messageTag = 'c'
+        # Handle new clients
+        if(listenSocket in readable):
+            try:
+                newClient , addr = listenSocket.accept()
+                if(currentPlayers < globals['maxPlaying']):
+                    addUser(db,newClient,AcceptStatus.PLAY)
+                    currentPlayers += 1
+                elif(len(waitingList) < globals['maxWaiting']):
+                    addUser(db,newClient,AcceptStatus.WAIT)
+                    waitingList.append(newClient)
                 else:
-                    updateHeapsServer(heaps)
-                    if(checkForWin(heaps)):
-                        # server wins - last client move was valid
-                        messageTag = 's'
-            #continue program with loop
-        if(conn.fileno() >= 0):
-            shutdownSocket(conn)
-            #conn.close()
-    listenSocket.close()
+                    addUser(db,newClient,AcceptStatus.REJECT)
+            except OSError as err:
+                print('Failed to accept an incoming connection... ')
+                print(err.strerror)
+                break
+        
+        # Handle existing clients - sending messages to client
+        for client in writble:
+            if(db[client]['status'] == ClientStatus.READY_TO_SEND or db[client]['status'] == ClientStatus.SENDING):
+                sendMsg(db,client)
+                db[client]['status'] = ClientStatus.SENDING
+                # check if need to terminate client
+                if(len(db[client]['sendingBuffer']) == 0):
+                    #message is fully sent- check if connection should be terminated
+                    print("Message was sent fully")
+                    if(db[client]['messageTag'] == 'r' or db[client]['gameOver']):
+                        if(db[client]['socket'].fileno() >= 0):
+                            shutdownSocket(db[client]['socket'])
+                        deleteUser(db,client)
+                    else:
+                        db[client]['status'] = ClientStatus.READY_TO_READ
+                        db[client]['recvChunks'] = []
+                        db[client]['bytesRecv'] = 0
 
-#Main function for the program
-def main():
-    na,nb,nc,PORT = getConsoleInput()
-    server(na,nb,nc,PORT)
+        for client in readable:
+            if(client is listenSocket):
+                continue
+            if(db[client]['status'] == ClientStatus.READY_TO_READ or db[client]['status'] == ClientStatus.READING):
+                recvMsg(db,client)
+                db[client]['status'] = ClientStatus.READING
+                if(db[client]['bytesRecv'] == 5):
+                    # message is fully received - update game status
+                    msg = b''.join(db[client]['recvChunks'])
+                    print(f"Message was receieved fully w/ {msg}")
+                    newMsg = handleNewMove(db,client,msg)
+                    db[client]['status'] = ClientStatus.READY_TO_SEND
+                    db[client]['sendingBuffer'] = newMsg
+                    print(f"New message server has to send is {db[client]['sendingBuffer']}")
+        
+        # Cleanup of disconnected sockets
+        for client in list(db.keys()):
+            if(db[client]['disconnected']):
+                if(db[client]['status'] == AcceptStatus.PLAY):
+                    currentPlayers -= 1
+                if(db[client]['status'] == AcceptStatus.WAIT):
+                    # Remove a disconnected waiting client from the waiting list
+                    waitingList = [socket for socket in waitingList if socket != client]
+                shutdownSocket(db[client]['socket'])
+                deleteUser(db,client)
+        
+        # Get new waiting players to the game
+        while(currentPlayers < globals['maxPlaying'] and len(waitingList) > 0):
+            newClient = waitingList.pop(0)
+            addUser(db,newClient,AcceptStatus.PLAY) # This overwrites his waiting status in db
+            currentPlayers += 1
 
+    listenSocket.close() # Server Cleanup
 
-def test():
-    #test_basicGame(5,5,5)
-    #recv = test_Recvall()
-    heapIndex , amount = parseRecvInput(b'X\x00\x00\x00\x00')
-    print(heapIndex,amount)
-
-    
-
-def test_Recvall():
-    sent = struct.pack(">ci",b'A',999)
-    print(f"message to send: {sent}")
-    MSGLEN = struct.calcsize(">ci")
-    STRUCT_SIZE = 33
-    bytesLeft = 0
-    chunks = []
-    while bytesLeft < MSGLEN:
-        data = sent[0:2]
-        if data == b'':
-            print("disconnect")
-            return
-        else:
-            bytesLeft += sys.getsizeof(data)-STRUCT_SIZE
-            chunks.append(data)
-        sent = sent[2:]
-    print("message recieved fully")
-    print(f"message : {b''.join(chunks)}")
-    return b''.join(chunks)
+                    
         
 
 
+#Main function for the program
+def main():
+    getConsoleInput()
+    server()
 
-def test_basicGame(na,nb,nc):
-    heaps = [na,nb,nc]
-    while(True):
-        print(heaps)
-        index = int(input())
-        amount = int(input())
-        if(checkValid(heaps,index,amount)):
-            updateHeapsClient(heaps,index,amount)
-        if(checkForWin(heaps)):
-            print("Client won")
-            break
-        updateHeapsServer(heaps)
-        if(checkForWin(heaps)):
-            print("Server won")
-            break
+def test():
+    getConsoleInput()
+
 
 DEBUG = False
 func = main if not DEBUG else test

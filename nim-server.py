@@ -59,6 +59,7 @@ def initUser(socket,accept_status):
     else:
         messageTag = 'r'
     return {
+        'acceptStatus' : accept_status,
         'socket' : socket,
         'heaps' : [globals['na'],globals['nb'],globals['nc']] , 
         'messageTag' : messageTag,
@@ -82,7 +83,6 @@ def deleteUser(db,userId):
 # Recv and Send msg
 def recvMsg(db,client):
     STRUCT_SIZE = 33
-    print(f"Server receiveing msg for client {client}")
     try:
         data = db[client]['socket'].recv(1024)
     except OSError as error:
@@ -97,8 +97,7 @@ def recvMsg(db,client):
     db[client]['recvChunks'].append(data)
 
 def sendMsg(db, client):
-    print(f"Server sending msg for client {client}")
-    print(f"message to send is {db[client]['sendingBuffer']}")
+    print(f"message for {client} is {db[client]['sendingBuffer']}")
     try:
         if len(db[client]['sendingBuffer']) != 0:
             ret = db[client]['socket'].send(db[client]['sendingBuffer'])
@@ -122,7 +121,7 @@ def shutdownSocket(conn):
 # GAMEPLAY methods
 def handleNewMove(db,client,msg):
     heapIndex, amount = parseRecvInput(msg)
-    print(f"Server handing new move w/ msg - {heapIndex} , {amount}")
+    print(f"Incoming heaps for {client} are {db[client]['heaps']}")
     # Make game move and set messageTag:
     if(heapIndex >= 3): # Quit current game
         db[client]['disconnected'] = True
@@ -146,6 +145,7 @@ def handleNewMove(db,client,msg):
                 # server wins - last client move was valid
                 messageTag = 's'
                 db[client]['gameOver'] = True
+    print(f"Outgoing heaps for {client} are {db[client]['heaps']}")
     return struct.pack(">ciii",messageTag.encode(UTF),db[client]['heaps'][0],db[client]['heaps'][1],db[client]['heaps'][2])
 
 # Gets char as heapId
@@ -252,8 +252,7 @@ def server():
                 # check if need to terminate client
                 if(len(db[client]['sendingBuffer']) == 0):
                     #message is fully sent- check if connection should be terminated
-                    print("Message was sent fully")
-                    if(db[client]['status'] == AcceptStatus.REJECT or db[client]['gameOver']):
+                    if(db[client]['acceptStatus'] == AcceptStatus.REJECT or db[client]['gameOver']):
                         if(db[client]['socket'].fileno() >= 0):
                             shutdownSocket(db[client]['socket'])
                         deleteUser(db,client)
@@ -268,6 +267,8 @@ def server():
             if(db[client]['status'] == ClientStatus.READY_TO_READ or db[client]['status'] == ClientStatus.READING):
                 recvMsg(db,client)
                 db[client]['status'] = ClientStatus.READING
+                if(db[client]['bytesRecv'] > 5):
+                    db[client]['disconnected'] = True
                 if(db[client]['bytesRecv'] == 5):
                     # message is fully received - update game status
                     msg = b''.join(db[client]['recvChunks'])
@@ -276,15 +277,18 @@ def server():
                     db[client]['status'] = ClientStatus.READY_TO_SEND
                     db[client]['sendingBuffer'] = newMsg
                     print(f"New message server has to send is {db[client]['sendingBuffer']}")
+                
         
         # Cleanup of disconnected sockets
         for client in list(db.keys()):
             if(db[client]['disconnected']):
-                if(db[client]['status'] == AcceptStatus.PLAY):
+                if(db[client]['acceptStatus'] == AcceptStatus.PLAY):
                     currentPlayers -= 1
-                if(db[client]['status'] == AcceptStatus.WAIT):
+                    print("A player was removed from the 'playing list'")
+                if(db[client]['acceptStatus'] == AcceptStatus.WAIT):
                     # Remove a disconnected waiting client from the waiting list
-                    waitingList = [socket for socket in waitingList if socket != client]
+                    waitingList = [socket for socket in waitingList if socket != db[client]['socket']]
+                    print("A player was removed from the 'waiting list'")
                 shutdownSocket(db[client]['socket'])
                 deleteUser(db,client)
         
@@ -293,11 +297,9 @@ def server():
             newClient = waitingList.pop(0)
             addUser(db,newClient,AcceptStatus.PLAY) # This overwrites his waiting status in db
             currentPlayers += 1
+            print(f"client {db[newClient.fileno()]['socket'].fileno()} is now ready to play w/ status {db[newClient.fileno()]['status']}")
 
     listenSocket.close() # Server Cleanup
-
-                    
-        
 
 
 #Main function for the program

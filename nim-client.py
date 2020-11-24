@@ -58,7 +58,7 @@ def checkValidParm(tav, nA, nB, nC):
     return False
 
 
-# returns True if game should be continue, otherwise returns False
+# returns True if game should be continue, otherwise returns False, the second return value tells if we are waiting
 def parseCurrentPlayStatus(data):
     tav, nA, nB, nC = struct.unpack(">ciii", data)
     valid = checkValidParm(tav, nA, nB, nC)
@@ -72,10 +72,10 @@ def parseCurrentPlayStatus(data):
             print("Illegal move")
         elif tav == b'r':
             print("You are rejected by the server.")
-            return False
+            return False, False
         elif tav == b'w':
             print("Waiting to play against the server.")
-            return True
+            return True, True
 
         print("Heap A: " + str(nA))
         print("Heap B: " + str(nB))
@@ -83,15 +83,15 @@ def parseCurrentPlayStatus(data):
 
         if tav == b's' or tav == b't':
             print("Server win!")
-            return False
+            return False, False
         elif tav == b'c':
             print("You win!")
-            return False
+            return False, False
         print("Your turn:")
-        return True
+        return True, False
     else:
         print("server sent invalid message, exit game")
-        return False
+        return False, False
 
 
 def recvMsg(clientSoc):
@@ -155,8 +155,11 @@ def startPlay(clientSoc):
                     allDataRecv = b''.join(chunks)
                     chunks = []
                     gotSize = 0
-                    keepPlaying = parseCurrentPlayStatus(allDataRecv)
-                    state = CurrentState.USER_INPUT
+                    keepPlaying, waiting = parseCurrentPlayStatus(allDataRecv)
+                    if waiting:
+                        state = CurrentState.GET_MSG
+                    else:
+                        state = CurrentState.USER_INPUT
                 elif gotSize > RECV_MSG_LEN:
                     print("server sent invalid message, exit game")
                     keepPlaying = False
@@ -171,7 +174,19 @@ def startPlay(clientSoc):
                     state = CurrentState.GET_MSG
                     byteMsgToSend = b''
         else:
-            if sys.stdin in readable:
+            if clientSoc in readable:
+                try:
+                    data = clientSoc.recv(1024)
+                except OSError as error:
+                    if error.errno == errno.ECONNREFUSED:
+                        print("Disconnected from server")
+                    else:
+                        print(error.strerror + ", exit game")
+                    keepPlaying = False
+                if data == b'':
+                    print("Disconnected from server")
+                    keepPlaying = False
+            if sys.stdin in readable and keepPlaying:
                 quitCommand, byteMsgToSend = createStep()
                 if not quitCommand:
                     state = CurrentState.SEND_MSG

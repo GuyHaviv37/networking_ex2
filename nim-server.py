@@ -253,7 +253,7 @@ def server():
                 if(len(db[client]['sendingBuffer']) == 0):
                     #message is fully sent- check if connection should be terminated
                     print("Message was sent fully")
-                    if(db[client]['messageTag'] == 'r' or db[client]['gameOver']):
+                    if(db[client]['status'] == AcceptStatus.REJECT or db[client]['gameOver']):
                         if(db[client]['socket'].fileno() >= 0):
                             shutdownSocket(db[client]['socket'])
                         deleteUser(db,client)

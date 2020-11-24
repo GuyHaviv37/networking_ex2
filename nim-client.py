@@ -139,7 +139,7 @@ def startPlay(clientSoc):
     chunks = []
     byteMsgToSend = b''
     while keepPlaying:
-        readable, writable, _ = select([clientSoc, sys.stdin], [clientSoc],[])
+        readable, writable, _ = select([clientSoc, sys.stdin], [clientSoc], [])
         if state == CurrentState.GET_MSG:
             if sys.stdin in readable:
                 keepPlaying = not getInput()
@@ -157,7 +157,7 @@ def startPlay(clientSoc):
                     gotSize = 0
                     keepPlaying = parseCurrentPlayStatus(allDataRecv)
                     state = CurrentState.USER_INPUT
-                else:
+                elif gotSize > RECV_MSG_LEN:
                     print("server sent invalid message, exit game")
                     keepPlaying = False
         elif state == CurrentState.SEND_MSG:
@@ -171,11 +171,12 @@ def startPlay(clientSoc):
                     state = CurrentState.GET_MSG
                     byteMsgToSend = b''
         else:
-            quitCommand, byteMsgToSend = createStep()
-            if not quitCommand:
-                state = CurrentState.SEND_MSG
-            else:
-                keepPlaying = False
+            if sys.stdin in readable:
+                quitCommand, byteMsgToSend = createStep()
+                if not quitCommand:
+                    state = CurrentState.SEND_MSG
+                else:
+                    keepPlaying = False
 
 
 # create the first connection

@@ -253,9 +253,7 @@ def server():
                 if(len(db[client]['sendingBuffer']) == 0):
                     #message is fully sent- check if connection should be terminated
                     if(db[client]['acceptStatus'] == AcceptStatus.REJECT or db[client]['gameOver']):
-                        if(db[client]['socket'].fileno() >= 0):
-                            shutdownSocket(db[client]['socket'])
-                        deleteUser(db,client)
+                        db[client]['disconnected'] = True
                     else:
                         db[client]['status'] = ClientStatus.READY_TO_READ
                         db[client]['recvChunks'] = []

@@ -5,6 +5,7 @@ import sys
 import errno
 from select import select
 from enum import Enum
+import functools
 
 UTF = 'utf-8'
 
@@ -120,6 +121,7 @@ def shutdownSocket(conn):
 
 # GAMEPLAY methods
 def handleNewMove(db,client,msg):
+    updateHeapsServer = updateHeapServerOptimal if globals['optimal'] else updateHeapsServerNaive
     heapIndex, amount = parseRecvInput(msg)
     print(f"Incoming heaps for {client} are {db[client]['heaps']}")
     # Make game move and set messageTag:
@@ -185,10 +187,24 @@ def checkValid(heaps,heapIndex,amount):
     else:
         return True
     
+
+def updateHeapServerOptimal(heaps):
+    nim_sum = functools.reduce(lambda x, y: x ^ y, heaps) 
+    if nim_sum == 0:
+        updateHeapsServerNaive(heaps)
+        return
+    
+    for i, heap in enumerate(heaps):
+        nim_sum_heap = heap ^ nim_sum
+        if nim_sum_heap < heap:
+            heaps[i] -= (heaps[i] - nim_sum_heap)
+            return
+
+     
 # Makes server game move
 # Looks for biggest heap and removes 1 from it
 # TESTED
-def updateHeapsServer(heaps):
+def updateHeapsServerNaive(heaps):
     maxNum = max(heaps)
     for i in range(3):
         if heaps[i] == maxNum:

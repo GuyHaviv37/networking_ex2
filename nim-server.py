@@ -35,7 +35,7 @@ def getConsoleInput():
     inputLen = len(sys.argv)
     if not(inputLen >= 6  or inputLen <= 10) :
         print("Invalid number of arguements for nim-server")
-        print("Should be of format : heapA heapB heapC num_players wait-list-size [PORT] [--optimal-startegy] [--multithreading timer] ")
+        print("Should be of format : heapA heapB heapC num_players wait-list-size [PORT] [--optimal-strategy]")
         sys.exit(0)
     globals['na'] = int(sys.argv[1])
     globals['nb'] = int(sys.argv[2])
@@ -45,11 +45,15 @@ def getConsoleInput():
     if(inputLen >= 7): # can add check to viable PORT number , i.e. > 1024
         if sys.argv[6].isdigit():
             globals['PORT'] = int(sys.argv[6])
+        elif sys.argv[6] == "--optimal-strategy":
+            globals['optimal'] = True
         else:
-            print("Error: PORT number specified is invalid.")
-            sys.exit(0) 
-    globals['optimal'] = (inputLen >= 8 and sys.argv[7] == "--optimal-strategy")
-    # if inputLen >= 10 and both the flag and timer are correct we can add support for multithreading and timer
+            print("Error: Invalid optional argument.")
+            print("Should be of format : heapA heapB heapC num_players wait-list-size [PORT] [--optimal-strategy]")
+            sys.exit(0)
+    if(inputLen >= 8):
+        globals['optimal'] = sys.argv[7] == "--optimal-strategy"
+    
 
 
 def initUser(socket,accept_status):
@@ -98,7 +102,6 @@ def recvMsg(db,client):
     db[client]['recvChunks'].append(data)
 
 def sendMsg(db, client):
-    print(f"message for {client} is {db[client]['sendingBuffer']}")
     try:
         if len(db[client]['sendingBuffer']) != 0:
             ret = db[client]['socket'].send(db[client]['sendingBuffer'])
@@ -123,7 +126,6 @@ def shutdownSocket(conn):
 def handleNewMove(db,client,msg):
     updateHeapsServer = updateHeapServerOptimal if globals['optimal'] else updateHeapsServerNaive
     heapIndex, amount = parseRecvInput(msg)
-    print(f"Incoming heaps for {client} are {db[client]['heaps']}")
     # Make game move and set messageTag:
     if(heapIndex >= 3): # Quit current game
         db[client]['disconnected'] = True
@@ -147,7 +149,6 @@ def handleNewMove(db,client,msg):
                 # server wins - last client move was valid
                 messageTag = 's'
                 db[client]['gameOver'] = True
-    print(f"Outgoing heaps for {client} are {db[client]['heaps']}")
     return struct.pack(">ciii",messageTag.encode(UTF),db[client]['heaps'][0],db[client]['heaps'][1],db[client]['heaps'][2])
 
 # Gets char as heapId
@@ -286,11 +287,9 @@ def server():
                 if(db[client]['bytesRecv'] == 5):
                     # message is fully received - update game status
                     msg = b''.join(db[client]['recvChunks'])
-                    print(f"Message was receieved fully w/ {msg}")
                     newMsg = handleNewMove(db,client,msg)
                     db[client]['status'] = ClientStatus.READY_TO_SEND
                     db[client]['sendingBuffer'] = newMsg
-                    print(f"New message server has to send is {db[client]['sendingBuffer']}")
                 
         
         # Cleanup of disconnected sockets
@@ -298,11 +297,9 @@ def server():
             if(db[client]['disconnected']):
                 if(db[client]['acceptStatus'] == AcceptStatus.PLAY):
                     currentPlayers -= 1
-                    print("A player was removed from the 'playing list'")
                 if(db[client]['acceptStatus'] == AcceptStatus.WAIT):
                     # Remove a disconnected waiting client from the waiting list
                     waitingList = [socket for socket in waitingList if socket != db[client]['socket']]
-                    print("A player was removed from the 'waiting list'")
                 shutdownSocket(db[client]['socket'])
                 deleteUser(db,client)
         
@@ -311,7 +308,6 @@ def server():
             newClient = waitingList.pop(0)
             addUser(db,newClient,AcceptStatus.PLAY) # This overwrites his waiting status in db
             currentPlayers += 1
-            print(f"client {db[newClient.fileno()]['socket'].fileno()} is now ready to play w/ status {db[newClient.fileno()]['status']}")
 
     listenSocket.close() # Server Cleanup
 
